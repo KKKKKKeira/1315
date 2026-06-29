@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>1815 富喬 走勢分析</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body { background-color: #030712; }
+    .animate-pulse-dot {
+      animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  </style>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { 'gray-950': '#030712' } } }
+    };
+  </script>
+</head>
+<body class="text-gray-100 min-h-screen">
+
+<div class="max-w-7xl mx-auto p-4">
+
+  <!-- ── 標題列 ── -->
+  <header class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-2xl font-bold text-white">1815 富喬工業</h1>
+      <p id="today-date" class="text-gray-400 text-sm"></p>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="last-update" class="text-xs text-yellow-400 hidden"></span>
+      <span id="ws-status" class="px-2 py-1 rounded text-xs font-semibold bg-yellow-900 text-yellow-300">連線中...</span>
+    </div>
+  </header>
+
+  <!-- ── 主要區域：圖表(2/3) + 右側面板(1/3) ── -->
+  <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+
+    <!-- K線圖 + 情境卡片 -->
+    <div class="xl:col-span-2 bg-gray-900 rounded-xl p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold text-white">日K 走勢圖</h2>
+        <span id="current-price" class="text-xl font-bold text-yellow-400"></span>
+      </div>
+      <div id="chart" class="w-full" style="height:320px"></div>
+      <div id="scenarios-container" class="mt-4"></div>
+    </div>
+
+    <!-- 右側：支撐壓力 + 盤中面板 -->
+    <div class="space-y-4">
+      <div id="price-levels-panel">
+        <div class="bg-gray-900 rounded-xl p-4">
+          <h2 class="text-lg font-semibold text-white mb-2">支撐壓力區間</h2>
+          <p class="text-gray-500 text-sm">載入中...</p>
+        </div>
+      </div>
+      <div id="intraday-panel"></div>
+    </div>
+
+  </div>
+
+  <!-- ── 籌碼面板 ── -->
+  <div id="chip-panel">
+    <div class="bg-gray-900 rounded-xl p-4">
+      <h2 class="text-lg font-semibold text-white mb-2">籌碼面板</h2>
+      <p class="text-gray-500 text-sm">載入中...</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+// 設定：部署到 HiCloud 後只需改這兩行
+// ═══════════════════════════════════════════════════════
+const API_BASE = 'http://localhost:8000';
+const WS_URL   = 'ws://localhost:8000/ws';
+
+// ── 常數 ──────────────────────────────────────────────
+const SCENARIO_COLORS = {
+  strong_bull: '#16a34a', bull: '#4ade80', flat: '#6b7280',
+  bear: '#f87171',        strong_bear: '#dc2626',
+};
+const SCENARIO_LABELS = {
+  strong_bull: '強勢上漲（>+2%）', bull: '溫和上漲（+0.5%~+2%）',
+  flat: '盤整（-0.5%~+0.5%）',    bear: '溫和下跌（-0.5%~-2%）',
+  strong_bear: '強勢下跌（<-2%）',
+};
+
+// ── 狀態 ──────────────────────────────────────────────
+let chartInstance   = null;
+let candleSeries    = null;
+let priceLinesAdded = false;
+
+// ═══════════════════════════════════════════════════════
+// 圖表初始化
+// ═══════════════════════════════════════════════════════
+function initChart() {
+  const container = document.getElementById('chart');
+  chartInstance = LightweightCharts.createChart(container, {
+    layout: {
+      background: { type: 'solid', color: '#111827' },
+      textColor: '#9ca3af',
+    },
+    grid: {
+      vertLines: { color: '#1f2937' },
+      horzLines: { color: '#1f2937' },
+    },
+    crosshair: { mode: 1 },
+    timeScale: { borderColor: '#374151', timeVisible: true },
+    rightPriceScale: { borderColor: '#374151' },
+    width:  container.clientWidth,
+    height: 320,
+  });
+
+  candleSeries = chartInstance.addCandlestickSeries({
+    upColor:      '#16a34a',
+    downColor:    '#dc2626',
+    borderVisible: false,
+    wickUpColor:   '#16a34a',
+    wickDownColor: '#dc2626',
+  });
+
+  new ResizeObserver(() => {
+    chartInstance?.applyOptions({ width: container.clientWidth });
+  }).observe(container);
+}
+
+function renderChart(history) {
+  if (!candleSeries || !history?.length) return;
+  const data = history
+    .map(d => ({
+      time:  d.date,
+      open:  Number(d.open),
+      high:  Number(d.max),
+      low:   Number(d.min),
+      close: Number(d.close),
+    }))
+    .filter(d => d.open && d.high && d.low && d.close);
+  candleSeries.setData(data);
+  chartInstance?.timeScale().fitContent();
+}
+
+function renderPriceLines(levels) {
+  if (!candleSeries || !levels || priceLinesAdded) return;
+  [
+    { price: levels.strong_resistance, color: '#dc2626', lineStyle: 2, title: '強壓力' },
+    { price: levels.weak_resistance,   color: '#f87171', lineStyle: 1, title: '弱壓力' },
+    { price: levels.entry_suggest,     color: '#facc15', lineStyle: 2, title: '建議進場' },
+    { price: levels.weak_support,      color: '#4ade80', lineStyle: 1, title: '弱支撐' },
+    { price: levels.strong_support,    color: '#16a34a', lineStyle: 2, title: '強支撐' },
+  ].forEach(({ price, color, lineStyle, title }) => {
+    if (!price) return;
+    candleSeries.createPriceLine({ price, color, lineWidth: 1, lineStyle, axisLabelVisible: true, title });
+  });
+  priceLinesAdded = true;
+}
+
+// ═══════════════════════════════════════════════════════
+// 情境卡片
+// ═══════════════════════════════════════════════════════
+function renderScenarios(prediction) {
+  const container = document.getElementById('scenarios-container');
+  const scenarios  = prediction?.scenarios?.scenarios || [];
+  const currentPrice = prediction?.scenarios?.current_price;
+
+  const el = document.getElementById('current-price');
+  if (currentPrice) el.textContent = `$ ${currentPrice}`;
+
+  if (!scenarios.length) {
+    container.innerHTML = '<p class="text-gray-500 text-sm">尚無情境資料，請先執行情境產生器</p>';
+    return;
+  }
+
+  container.innerHTML = `
+    <h3 class="text-sm text-gray-400 mb-2 font-medium">今日走勢情境（依機率排序）</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+      ${scenarios.map((sc, i) => {
+        const color = SCENARIO_COLORS[sc.key] || '#6b7280';
+        const prob  = Math.round(sc.probability * 100);
+        return `
+          <div class="bg-gray-800 rounded-lg p-3 border border-gray-700"
+               style="border-left-color:${color};border-left-width:3px">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs text-gray-400">#${i + 1}</span>
+              <span class="text-lg font-bold" style="color:${color}">${prob}%</span>
+            </div>
+            <p class="text-sm font-medium text-white mb-2">${sc.label}</p>
+            <div class="grid grid-cols-3 gap-1 text-xs text-gray-400">
+              <div>高: <span class="text-white">${sc.high_target}</span></div>
+              <div>目標: <span style="color:${color}">${sc.close_target}</span></div>
+              <div>低: <span class="text-white">${sc.low_target}</span></div>
+            </div>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// 支撐壓力面板
+// ═══════════════════════════════════════════════════════
+function renderPriceLevels(levels, xgbPred) {
+  const panel = document.getElementById('price-levels-panel');
+  if (!levels) return;
+
+  const rows = [
+    { label: '強壓力',   value: levels.strong_resistance, color: '#f87171' },
+    { label: '弱壓力',   value: levels.weak_resistance,   color: '#fca5a5' },
+    { label: '現價',     value: levels.current_price,     color: '#facc15', bold: true },
+    { label: '建議進場', value: levels.entry_suggest,     color: '#fde047' },
+    { label: '弱支撐',   value: levels.weak_support,      color: '#86efac' },
+    { label: '強支撐',   value: levels.strong_support,    color: '#4ade80' },
+  ];
+
+  const xgbHtml = xgbPred ? `
+    <div class="bg-gray-800 rounded-lg p-3 mt-4">
+      <p class="text-xs text-gray-400 mb-2 font-semibold">XGBoost 今日預測</p>
+      <div class="grid grid-cols-3 gap-2 text-center">
+        <div>
+          <p class="text-xs text-gray-500">預測高</p>
+          <p class="text-green-400 font-mono font-bold">${xgbPred.predicted_high?.toFixed(2) ?? '—'}</p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-500">預測收</p>
+          <p class="text-yellow-400 font-mono font-bold">${xgbPred.predicted_close?.toFixed(2) ?? '—'}</p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-500">預測低</p>
+          <p class="text-red-400 font-mono font-bold">${xgbPred.predicted_low?.toFixed(2) ?? '—'}</p>
+        </div>
+      </div>
+      ${xgbPred.close_chg != null ? `
+        <p class="text-center text-sm mt-2 font-semibold
+           ${xgbPred.close_chg >= 0 ? 'text-green-400' : 'text-red-400'}">
+          ${xgbPred.close_chg >= 0 ? '▲' : '▼'} ${Math.abs(xgbPred.close_chg).toFixed(2)}%
+        </p>` : ''}
+    </div>` : '';
+
+  panel.innerHTML = `
+    <div class="bg-gray-900 rounded-xl p-4">
+      <h2 class="text-lg font-semibold text-white mb-3">支撐壓力區間</h2>
+      <div class="space-y-1 mb-2">
+        ${rows.map(r => `
+          <div class="flex justify-between items-center py-1 border-b border-gray-800">
+            <span class="text-sm text-gray-400">${r.label}</span>
+            <span class="font-mono font-semibold ${r.bold ? 'text-lg' : ''}"
+                  style="color:${r.color}">${r.value?.toFixed(2) ?? '—'}</span>
+          </div>`).join('')}
+      </div>
+      ${xgbHtml}
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// 盤中即時面板
+// ═══════════════════════════════════════════════════════
+function renderIntraday(update) {
+  const panel = document.getElementById('intraday-panel');
+  const feats  = update.intraday_features;
+  const probs  = update.updated_probs || {};
+  const ICOLORS = {
+    strong_bull: '#4ade80', bull: '#86efac', flat: '#9ca3af',
+    bear: '#fca5a5',        strong_bear: '#f87171',
+  };
+
+  const sorted = Object.entries(probs).sort(([,a],[,b]) => b - a).slice(0, 3);
+
+  const t = document.getElementById('last-update');
+  t.textContent = `最後更新 ${new Date(update.time).toLocaleTimeString('zh-TW')}`;
+  t.classList.remove('hidden');
+
+  panel.innerHTML = `
+    <div class="bg-gray-900 rounded-xl p-4 border border-yellow-900">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse-dot"></span>
+        <h2 class="text-sm font-semibold text-yellow-300">盤中滾動更新</h2>
+      </div>
+      ${feats ? `
+        <div class="grid grid-cols-2 gap-2 mb-3 text-xs">
+          <div class="bg-gray-800 rounded p-2">
+            <p class="text-gray-500">現價</p>
+            <p class="text-white font-mono font-bold">${feats.current_price}</p>
+          </div>
+          <div class="bg-gray-800 rounded p-2">
+            <p class="text-gray-500">VWAP</p>
+            <p class="text-blue-300 font-mono">${feats.vwap}</p>
+          </div>
+          <div class="bg-gray-800 rounded p-2">
+            <p class="text-gray-500">買賣比</p>
+            <p class="${feats.buy_ratio > 0.5 ? 'text-green-400' : 'text-red-400'}">
+              ${(feats.buy_ratio * 100).toFixed(1)}% 買
+            </p>
+          </div>
+          <div class="bg-gray-800 rounded p-2">
+            <p class="text-gray-500">累積量</p>
+            <p class="text-white">${feats.cum_volume?.toLocaleString()}</p>
+          </div>
+        </div>` : ''}
+      <div class="space-y-1">
+        ${sorted.map(([sc, prob]) => `
+          <div class="flex items-center gap-2">
+            <div class="flex-1 bg-gray-800 rounded-full h-2">
+              <div class="h-2 rounded-full bg-yellow-500" style="width:${(prob*100).toFixed(1)}%"></div>
+            </div>
+            <span class="text-xs w-24" style="color:${ICOLORS[sc]}">${SCENARIO_LABELS[sc]?.split('（')[0]}</span>
+            <span class="text-xs text-gray-400 w-12 text-right">${(prob*100).toFixed(1)}%</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// 籌碼面板
+// ═══════════════════════════════════════════════════════
+function fmt(n) {
+  if (n == null) return '—';
+  const abs  = Math.abs(n);
+  const sign = n >= 0 ? '+' : '-';
+  if (abs >= 1e8) return `${sign}${(abs / 1e8).toFixed(1)}億`;
+  if (abs >= 1e4) return `${sign}${(abs / 1e4).toFixed(0)}萬`;
+  return `${sign}${abs.toFixed(0)}`;
+}
+
+function clr(v) {
+  return v == null ? 'text-white' : v > 0 ? 'text-green-400' : v < 0 ? 'text-red-400' : 'text-gray-400';
+}
+
+function renderChip(data) {
+  const panel       = document.getElementById('chip-panel');
+  const inst        = data?.institutional || [];
+  const margin      = data?.margin        || [];
+  const revenue     = data?.monthly_revenue || [];
+
+  const latestInst   = inst.at(-1)   || {};
+  const latestMargin = margin.at(-1)  || {};
+  const latestRev    = revenue.at(-1) || {};
+
+  const netCols  = Object.keys(latestInst).filter(k => k.startsWith('net_'));
+  const totalNet = netCols.reduce((s, k) => s + (latestInst[k] || 0), 0);
+
+  // 10日三大法人柱狀圖
+  const bars = inst.length > 5 ? `
+    <div class="mt-4">
+      <p class="text-xs text-gray-500 mb-1">三大法人近 10 日合計</p>
+      <div class="flex gap-1 items-end" style="height:52px">
+        ${inst.slice(-10).map(d => {
+          const net = netCols.reduce((s, k) => s + (d[k] || 0), 0);
+          const h   = Math.min(Math.abs(net) / 1e6 * 10, 40);
+          return `
+            <div class="flex flex-col items-center flex-1" title="${d.date?.slice(0,10)}: ${fmt(net)}">
+              <div class="w-full rounded-sm ${net >= 0 ? 'bg-green-600' : 'bg-red-600'}"
+                   style="height:${h+4}px"></div>
+              <span class="text-gray-600 text-xs mt-1">${d.date?.slice(5,10) || ''}</span>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  panel.innerHTML = `
+    <div class="bg-gray-900 rounded-xl p-4">
+      <h2 class="text-lg font-semibold text-white mb-4">籌碼面板</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+        <div class="bg-gray-800 rounded-lg p-3">
+          <p class="text-xs text-gray-500 mb-1">三大法人合計</p>
+          <p class="font-bold text-lg font-mono ${clr(totalNet)}">${fmt(totalNet)}</p>
+          <p class="text-xs text-gray-500 mt-1">${latestInst.date?.slice(0,10) || ''}</p>
+        </div>
+        ${netCols.map(k => `
+          <div class="bg-gray-800 rounded-lg p-3">
+            <p class="text-xs text-gray-500 mb-1">${k.replace('net_','')}</p>
+            <p class="font-bold text-lg font-mono ${clr(latestInst[k])}">${fmt(latestInst[k])}</p>
+          </div>`).join('')}
+        <div class="bg-gray-800 rounded-lg p-3">
+          <p class="text-xs text-gray-500 mb-1">融資餘額</p>
+          <p class="font-bold text-lg font-mono text-white">${fmt(latestMargin.MarginPurchaseTodayBalance)}</p>
+          <p class="text-xs ${clr(latestMargin.margin_change)} mt-1">變化 ${fmt(latestMargin.margin_change)}</p>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-3">
+          <p class="text-xs text-gray-500 mb-1">融券餘額</p>
+          <p class="font-bold text-lg font-mono text-white">${fmt(latestMargin.ShortSaleTodayBalance)}</p>
+          <p class="text-xs ${clr(-latestMargin.short_change)} mt-1">變化 ${fmt(latestMargin.short_change)}</p>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-3">
+          <p class="text-xs text-gray-500 mb-1">月營收</p>
+          <p class="font-bold text-lg font-mono text-white">
+            ${latestRev.revenue ? (latestRev.revenue / 1e6).toFixed(0) + '百萬' : '—'}
+          </p>
+          <p class="text-xs ${clr(latestRev.revenue_yoy)} mt-1">YoY ${latestRev.revenue_yoy?.toFixed(1) ?? '—'}%</p>
+        </div>
+      </div>
+      ${bars}
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════
+// WebSocket（自動重連）
+// ═══════════════════════════════════════════════════════
+function initWebSocket() {
+  let delay = 1000;
+  let pingTimer = null;
+
+  function setStatus(s) {
+    const el = document.getElementById('ws-status');
+    const cfg = {
+      connected:    ['即時連線',  'bg-green-900 text-green-300'],
+      connecting:   ['連線中...', 'bg-yellow-900 text-yellow-300'],
+      disconnected: ['已斷線',    'bg-red-900 text-red-300'],
+    };
+    const [text, cls] = cfg[s] || cfg.disconnected;
+    el.textContent = text;
+    el.className = `px-2 py-1 rounded text-xs font-semibold ${cls}`;
+  }
+
+  function connect() {
+    setStatus('connecting');
+    const ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      setStatus('connected');
+      delay = 1000;
+      pingTimer = setInterval(() => { ws.readyState === 1 && ws.send('ping'); }, 25000);
+    };
+
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'init') {
+          renderScenarios({ scenarios: msg.scenarios, xgb_prediction: msg.xgb_prediction });
+        } else if (msg.type === 'intraday_update') {
+          renderIntraday(msg);
+        }
+      } catch {}
+    };
+
+    ws.onclose = () => {
+      setStatus('disconnected');
+      clearInterval(pingTimer);
+      setTimeout(connect, delay);
+      delay = Math.min(delay * 2, 30000);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  connect();
+}
+
+// ═══════════════════════════════════════════════════════
+// 初始資料載入
+// ═══════════════════════════════════════════════════════
+async function loadInitialData() {
+  try {
+    const [pred, hist, chip, levels] = await Promise.all([
+      fetch(`${API_BASE}/api/prediction/today`).then(r => r.json()),
+      fetch(`${API_BASE}/api/price_history?days=120`).then(r => r.json()),
+      fetch(`${API_BASE}/api/chip?days=60`).then(r => r.json()),
+      fetch(`${API_BASE}/api/prediction/price_levels`).then(r => r.json()),
+    ]);
+
+    renderChart(hist);
+    renderPriceLines(levels);
+    renderScenarios(pred);
+    renderPriceLevels(levels, pred?.xgb_prediction);
+    renderChip(chip);
+  } catch (err) {
+    console.error('資料載入失敗（是否已啟動後端？）:', err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// 啟動
+// ═══════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  // 顯示今日日期
+  document.getElementById('today-date').textContent =
+    new Date().toLocaleDateString('zh-TW', {
+      year: 'numeric', month: 'long', day: 'numeric', weekday: 'short',
+    });
+
+  initChart();
+  loadInitialData();
+  initWebSocket();
+});
+</script>
+</body>
+</html>

@@ -4,8 +4,7 @@ __pycache__/
 .env
 data/
 models/
-frontend/node_modules/
-frontend/dist/
+# (React 已移除，改用 dashboard.html)
 *.parquet
 *.joblib
 *.log

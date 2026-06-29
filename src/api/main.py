@@ -20,7 +20,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from src.api.routes import prediction, realtime
 from src.data.ws_client import tick_queue, run as ws_run
@@ -75,7 +75,7 @@ app.add_middleware(
 app.include_router(prediction.router, prefix="/api")
 app.include_router(realtime.router)
 
-# 前端靜態檔（生產環境）
-frontend_dist = Path("frontend/dist")
-if frontend_dist.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+# 直接回傳 dashboard.html（不需要 npm build）
+@app.get("/", response_class=FileResponse)
+async def serve_dashboard():
+    return FileResponse("dashboard.html")
