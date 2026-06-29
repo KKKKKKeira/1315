@@ -1,0 +1,20 @@
+# 1815 富喬 自動化排程（貼到 HiCloud CVM 的 crontab）
+# crontab -e 後貼入以下設定（台北時區 Asia/Taipei）
+
+# 08:30 抓美股前日收盤、VIX、匯率、期貨
+30 8 * * 1-5 cd /app && python -m src.data.fetch_daily --mode pre_market >> /var/log/1815/pre_market.log 2>&1
+
+# 09:00 開盤前產生今日走勢情境預測
+0 9 * * 1-5 cd /app && python -m src.model.scenario_builder >> /var/log/1815/scenario.log 2>&1
+
+# 13:35 收盤後抓三大法人、融資券、集保、當日日K
+35 13 * * 1-5 cd /app && python -m src.data.fetch_daily --mode post_market >> /var/log/1815/post_market.log 2>&1
+
+# 每月10日 10:00 抓月營收（各公司）
+0 10 10 * * cd /app && python -m src.data.fetch_daily --mode monthly_revenue >> /var/log/1815/monthly.log 2>&1
+
+# 每季（3/5/8/11月15日）抓季財報
+0 10 15 3,5,8,11 * cd /app && python -m src.data.fetch_daily --mode financials >> /var/log/1815/financials.log 2>&1
+
+# 每天凌晨 02:00 重新訓練模型（用前一日新數據）
+0 2 * * 2-6 cd /app && python -m src.model.price_predictor --train >> /var/log/1815/train.log 2>&1
